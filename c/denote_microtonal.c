@@ -20,6 +20,7 @@ typedef struct _denote_microtonal {
     long notes[MAX_CHORD_SIZE][3];
     long mod_note_num_active[NUM_NOTE_RATIOS];
     long mod_note_index[NUM_NOTE_RATIOS][MAX_CHORD_SIZE];           //array that stores the current note voice (if active), otherwise -1
+    long key_offset;
     t_atom list_out[3];
     int chordElementRouting[MAX_CHORD_SIZE];
     ratio_list_t ratio_list[NUM_NOTE_RATIOS];
@@ -37,7 +38,6 @@ typedef struct _denote_microtonal {
 #define PITCHBEND   2
 
 t_symbol* SYM_MPE;
-t_symbol* SYM_RATIO;
 t_symbol* SYM_NOTE;
 t_symbol* SYM_LOADDICT;
 t_symbol** SYM_NOTES;
@@ -54,9 +54,10 @@ t_symbol* max_err_dupl_sym;
 t_symbol* max_err_mem_sym;
 
 
-double calculate_pitchbend(long mod_note_index, double ratio);
+double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index);
 int find_note_index(t_denote_microtonal* x, uint8_t note);
 
+void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx);
 void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
@@ -79,6 +80,7 @@ void ext_main(void *r)
     class_addmethod(c, (method)denote_microtonal_note_list,             "note",         A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_read_dictionary,       "loaddict",     A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_process_ratio_change,  "set_ratio",    A_GIMME, 0);
+    class_addmethod(c, (method)denote_microtonal_set_key,               "set_key",      A_LONG, 0);
 	class_addmethod(c, (method)denote_microtonal_assist,	            "assist",	    A_CANT, 0);
 
 	class_register(CLASS_BOX, c);
@@ -86,7 +88,6 @@ void ext_main(void *r)
     
     SYM_MPE = gensym("mpe");
     SYM_NOTE = gensym("note");
-    SYM_RATIO = gensym("sel_ratio");
     SYM_LOADDICT = gensym("loaddict");
     SYM_INIT = gensym("init");
     SYM_PB = gensym("pb");
@@ -168,6 +169,7 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
     }
     memset(x->chordElementRouting, -1, sizeof(int) * MAX_CHORD_SIZE);
     x->dict_processed = false;
+    x->key_offset = 0;
 	return(x);
 }
 
@@ -264,7 +266,7 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
                 
                 //if it's not null, calculate the pitchbend. Otherwise set pitchbend to 0 and log an error
                 if (rl->ratio_arr != NULL){
-                    x->notes[index][PITCHBEND] = calculate_pitchbend(mod_note, rl->ratio_arr[rl->active_ratio]);
+                    x->notes[index][PITCHBEND] = calculate_pitchbend(x, mod_note);
                 } else {
                     x->notes[index][PITCHBEND] = 0;
                     out_error(x, gensym("send_chord pitchbend calc: "), gensym("ratio_array is null"));
@@ -374,7 +376,7 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
                     
                     //but double check array sanity
                     if (x->ratio_list[note].ratio_arr != NULL){
-                        pitchbend = calculate_pitchbend(note, x->ratio_list[note].ratio_arr[ratio_index]);
+                        pitchbend = calculate_pitchbend(x, note);
                     } else {
                         out_error(x, gensym("Process ratio change: "), gensym("ratio_arr is null"));
                     }
@@ -391,13 +393,30 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
     }
 }
 
-double calculate_pitchbend(long mod_note_index, double ratio){
+double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index){
     //calculate the "regular" tempered interval
-    double tempered_interval = pow(2, mod_note_index / 12.);
+    long key_corrected_mod_note = mod_note_index - x->key_offset;
+    if (key_corrected_mod_note < 0){
+        key_corrected_mod_note += 12;
+    }
+    double tempered_interval = pow(2, key_corrected_mod_note / 12.);
+    
+    double ratio = x->ratio_list[key_corrected_mod_note].ratio_arr[x->ratio_list[key_corrected_mod_note].active_ratio];
     
     //calculate the difference between the just ratio and the tempered ratio by dividing them
     //98304 is 8192 * 12, to scale the difference to + and - 1 semitone
     return 98304 * log2(ratio / tempered_interval);
+}
+
+
+void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
+    if (key_idx < 0){
+        key_idx = 0;
+    } else if (key_idx > 11){
+        key_idx = 11;
+    }
+    
+    x->key_offset = key_idx;
 }
     
 

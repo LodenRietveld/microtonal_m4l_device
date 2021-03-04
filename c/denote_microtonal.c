@@ -16,25 +16,27 @@ typedef struct ratio_list {
 
 typedef struct _denote_microtonal {
 	t_object p_ob;
-	void *out[MAX_CHORD_SIZE];
-    
+    void *out[MAX_CHORD_SIZE+1];
     long notes[MAX_CHORD_SIZE][3];
-    long note_mod_index[NUM_NOTE_RATIOS];           //array that stores the current note voice (if active), otherwise -1
+    long mod_note_num_active[NUM_NOTE_RATIOS];
+    long mod_note_index[NUM_NOTE_RATIOS][MAX_CHORD_SIZE];           //array that stores the current note voice (if active), otherwise -1
     t_atom list_out[3];
     int chordElementRouting[MAX_CHORD_SIZE];
     ratio_list_t ratio_list[NUM_NOTE_RATIOS];
     bool dict_processed;
     t_dictionary* d;
+    bool mpe;
 } t_denote_microtonal;
 
 #define SEMITONE    0.059463
 
-#define MIDI_NOTE   0
+#define LENGTH      8
+
+#define NOTE        0
 #define VELOCITY    1
 #define PITCHBEND   2
 
-#define LENGTH      8
-
+t_symbol* SYM_MPE;
 t_symbol* SYM_RATIO;
 t_symbol* SYM_NOTE;
 t_symbol* SYM_LOADDICT;
@@ -44,18 +46,26 @@ t_symbol* SYM_PB;
 t_symbol* SYM_RATIOS;
 t_symbol* SYM_NAMES;
 
+t_symbol* max_err_inv_sym;
+t_symbol* max_err_none_sym;
+t_symbol* max_err_generic_sym;
+t_symbol* max_err_inv_ptr_sym;
+t_symbol* max_err_dupl_sym;
+t_symbol* max_err_mem_sym;
 
+
+double calculate_pitchbend(long mod_note_index, double ratio);
+int find_note_index(t_denote_microtonal* x, uint8_t note);
 
 void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, char *s);
-double calculate_pitchbend(long mod_note_index, double ratio);
-void *denote_microtonal_new(long n);
+void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_free(t_denote_microtonal* x);
 
 
-t_class *denote_microtonal_class;		// global pointer to the object class - so max can reference the object
+t_class *denote_microtonal_class;
 
 
 //--------------------------------------------------------------------------
@@ -64,16 +74,17 @@ void ext_main(void *r)
 {
 	t_class *c;
 
-	c = class_new("denote_microtonal", (method)denote_microtonal_new, (method)denote_microtonal_free, sizeof(t_denote_microtonal), 0L, A_DEFLONG, 0);
+	c = class_new("denote_microtonal", (method)denote_microtonal_new, (method)denote_microtonal_free, sizeof(t_denote_microtonal), 0L, A_GIMME, 0);
 
     class_addmethod(c, (method)denote_microtonal_note_list,             "note",         A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_read_dictionary,       "loaddict",     A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_process_ratio_change,  "set_ratio",    A_GIMME, 0);
-	class_addmethod(c, (method)denote_microtonal_assist,	            "assist",	    A_CANT, 0);	// (optional) assistance method needs to be declared like this
+	class_addmethod(c, (method)denote_microtonal_assist,	            "assist",	    A_CANT, 0);
 
 	class_register(CLASS_BOX, c);
 	denote_microtonal_class = c;
     
+    SYM_MPE = gensym("mpe");
     SYM_NOTE = gensym("note");
     SYM_RATIO = gensym("sel_ratio");
     SYM_LOADDICT = gensym("loaddict");
@@ -81,43 +92,95 @@ void ext_main(void *r)
     SYM_PB = gensym("pb");
     SYM_RATIOS = gensym("ratios");
     SYM_NAMES = gensym("names");
-    SYM_NOTES = (t_symbol**) malloc(sizeof(t_symbol*) * NUM_NOTE_RATIOS);
     
+    max_err_inv_sym = gensym("Invalid error code");
+    max_err_none_sym = gensym("No error");
+    max_err_generic_sym = gensym("Generic error");
+    max_err_inv_ptr_sym = gensym("Invalid pointer");
+    max_err_dupl_sym = gensym("Is duplicate");
+    max_err_mem_sym = gensym("Out of memory");
+    
+	post("denote_microtonal has finished loading",0);
+    post("version: %s :: %s", __DATE__, __TIME__, 0);
+}
+
+
+t_symbol* get_err_msg(t_max_err e){
+    switch(e){
+        case MAX_ERR_NONE:
+            return max_err_none_sym;
+            break;
+        case MAX_ERR_GENERIC:
+            return max_err_generic_sym;
+            break;
+        case MAX_ERR_INVALID_PTR:
+            return max_err_inv_ptr_sym;
+            break;
+        case MAX_ERR_DUPLICATE:
+            return max_err_dupl_sym;
+            break;
+        case MAX_ERR_OUT_OF_MEM:
+            return max_err_mem_sym;
+            break;
+        default:
+            return max_err_inv_sym;
+            break;
+    }
+}
+
+void out_error(t_denote_microtonal* x, t_symbol* loc, t_symbol* err_msg){
+    t_atom err[3];
+    atom_setsym(err, gensym("error"));
+    atom_setsym(err+1, loc);
+    atom_setsym(err+2, err_msg);
+    outlet_list(x->out[0], NULL, 3, err);
+}
+
+
+//--------------------------------------------------------------------------
+
+void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
+{
+	t_denote_microtonal *x;
+	x = (t_denote_microtonal *)object_alloc(denote_microtonal_class);
+    
+    if (argc == 1 && atom_getsym(argv) == SYM_MPE){
+        post("MPE enabled");
+        x->mpe = true;
+    } else {
+        post("MPE disabled");
+        x->mpe = false;
+    }
+    
+    for (short i = 0; i < LENGTH+1; i++){
+        x->out[i] = listout(x);
+    }
+    
+    
+    SYM_NOTES = (t_symbol**) sysmem_newptr(sizeof(t_symbol*) * NUM_NOTE_RATIOS);
     
     for (int i = 0; i < NUM_NOTE_RATIOS; i++){
         SYM_NOTES[i] = gensym(notenames[i]);
     }
     
-
-	post("denote_microtonal has finished loading",0);	// post any important info to the max window when our class is loaded
-}
-
-
-//--------------------------------------------------------------------------
-
-void *denote_microtonal_new(long n)		// n = int argument typed into object box (A_DEFLONG) -- defaults to 0 if no args are typed
-{
-	t_denote_microtonal *x;				// local variable (pointer to a t_denote_microtonal data structure)
-
-	x = (t_denote_microtonal *)object_alloc(denote_microtonal_class); // create a new instance of this object
-    
-    for (short i = 0; i < LENGTH; i++){
-        x->out[i] = listout(x);        // create an int outlet and assign it to our outlet variable in the instance's data structure
+    for (int i = 0; i < NUM_NOTE_RATIOS; i++){
+        memset(x->mod_note_index[i], -1, sizeof(long) * MAX_CHORD_SIZE);
     }
-    
-    memset(x->note_mod_index, -1, sizeof(long) * NUM_NOTE_RATIOS);
     memset(x->chordElementRouting, -1, sizeof(int) * MAX_CHORD_SIZE);
     x->dict_processed = false;
-	return(x);					// return a reference to the object instance
+	return(x);
 }
 
 
 //--------------------------------------------------------------------------
 
-void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, char *s) // 4 final arguments are always the same for the assistance method
+void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, char *s)
 {
-	if (m == ASSIST_OUTLET)
-		sprintf(s,"List of midi note, velocity and pitchbend, or list of 'pb' and pitchbend");
+    if (m == ASSIST_OUTLET && a < MAX_CHORD_SIZE){
+		sprintf(s,"List of midi note, velocity and pitchbend, or list of 'pb' and pitchbend for midi channel %ld", a);
+    } else if (a == MAX_CHORD_SIZE){
+        sprintf(s, "Error outlet. Puts out any errors encountered in a list");
+    }
 	else {
 		switch (a) {
 		case 0:
@@ -132,20 +195,22 @@ void update_pb(t_denote_microtonal *x, long index){
     
     atom_setsym(l, SYM_PB);
     atom_setlong(l+1, x->notes[index][PITCHBEND]);
-    
-    outlet_list(x->out[index], NULL, 2, l);
+
+    outlet_list(x->out[index+1], NULL, 2, l);
 }
 
-void update_chord(t_denote_microtonal *x, long changed){
-    atom_setlong(x->list_out+MIDI_NOTE, x->notes[changed][MIDI_NOTE]);
+void send_chord(t_denote_microtonal *x, long changed){
+    atom_setlong(x->list_out+NOTE, x->notes[changed][NOTE]);
     atom_setlong(x->list_out+VELOCITY, x->notes[changed][VELOCITY]);
     atom_setlong(x->list_out+PITCHBEND, x->notes[changed][PITCHBEND]);
-    outlet_list(x->out[changed], NULL, 3, x->list_out);
+    
+    outlet_list(x->out[changed+1], NULL, 3, x->list_out);
 }
 
 void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
-    if (argc - 1 == 2){
+    if (argc == 2){
         long note = atom_getlong(argv);
+        uint8_t mod_note = note % 12;
         long vel = atom_getlong(argv+1);
         uint8_t changed = 0;
         bool add = (vel > 0);
@@ -155,33 +220,65 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
         for (int i = LENGTH-1; i >= 0; i--){
             if (x->chordElementRouting[i] == -1 && index == -1){
                 index = i;
-            }
-            
-            if (x->chordElementRouting[i] == note){
+            } else if (x->chordElementRouting[i] == note){
                 found = true;
                 index = i;
+                break;
             }
         }
         
+        //early exit if we didn't find anything to do
+        if (index == -1){
+            return;
+        }
+        
+        //if the note already exists and the velocity is 0 (or lower), remove it from all arrays tracking it
         if (found && !add){
             changed = index;
             x->chordElementRouting[index] = -1;
-            x->note_mod_index[note % 12] = -1;
-            x->notes[index][MIDI_NOTE] = note;
+            x->mod_note_index[mod_note][x->mod_note_num_active[mod_note]] = -1;
+            
+            if (x->mod_note_num_active[mod_note] > 0){
+                x->mod_note_num_active[mod_note]--;
+            }
+            
+            x->notes[index][NOTE] = note;
             x->notes[index][VELOCITY] = vel;
+        //if it does not yet exist, and there's still space, add the note to all lists
         } else if (!found && add && index != -1){
             changed = index;
             x->chordElementRouting[index] = note;
-            x->note_mod_index[note % 12] = index;
-            x->notes[index][MIDI_NOTE] = note;
+            x->mod_note_index[mod_note][x->mod_note_num_active[mod_note]] = index;
+            
+            if (x->mod_note_num_active[mod_note] < MAX_CHORD_SIZE){
+                x->mod_note_num_active[mod_note]++;
+            }
+            
+            x->notes[index][NOTE] = note;
             x->notes[index][VELOCITY] = vel;
             
-            ratio_list_t* rl = &x->ratio_list[index % 12];
-            
-            x->notes[index][PITCHBEND] = rl->ratio_arr[rl->active_ratio];
+            //if the dictionary has been successfully read
+            if (x->dict_processed){
+                //get the correct ratio list
+                ratio_list_t* rl = &x->ratio_list[mod_note];
+                
+                //if it's not null, calculate the pitchbend. Otherwise set pitchbend to 0 and log an error
+                if (rl->ratio_arr != NULL){
+                    x->notes[index][PITCHBEND] = calculate_pitchbend(mod_note, rl->ratio_arr[rl->active_ratio]);
+                } else {
+                    x->notes[index][PITCHBEND] = 0;
+                    out_error(x, gensym("send_chord pitchbend calc: "), gensym("ratio_array is null"));
+                }
+            } else {
+                x->notes[index][PITCHBEND] = 0;
+            }
+        //if it already exists and velocity > 0, just change the velocity
+        } else if (found && add){
+            changed = index;
+            x->notes[index][VELOCITY] = vel;
         }
         
-        update_chord(x, changed);
+        send_chord(x, changed);
     }
 }
 
@@ -207,45 +304,57 @@ void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long
     
     if (dictionary_read(*filename, path, &x->d) == MAX_ERR_NONE){
         //init the init dict
-        t_dictionary* init_d = (t_dictionary*) malloc(sizeof(t_dictionary));
+        t_dictionary* init_d;
+        t_max_err e;
         
         //get the initialization dict from the main dict
-        dictionary_getdictionary(x->d, SYM_INIT, (t_object**) &init_d);
-        
-        for (int i = 0; i < NUM_NOTE_RATIOS; i++){
-            long num_ratios;
+        if ((e = dictionary_getdictionary(x->d, SYM_INIT, (t_object**) &init_d)) == MAX_ERR_NONE){
             
-            //init the note init dict
-            t_dictionary* note_init_d = (t_dictionary*) malloc(sizeof(t_dictionary));
-            
-            //get number of ratios for this note from the init dictionary embedded in the init dict
-            dictionary_getdictionary(init_d, SYM_NOTES[i], (t_object**) &note_init_d);
-            
-            //get the number of
-            dictionary_getlong(note_init_d, SYM_RATIOS, (t_atom_long*) &num_ratios);
-
-            //set the number of ratios and init the array of ratios
-            x->ratio_list[i].len = num_ratios;
-            x->ratio_list[i].ratio_arr = (double*) malloc(sizeof(double) * num_ratios);
-            
-            t_atom* ratio_doubles = NULL;
-            //get the ratios into an atom array
-            dictionary_copyatoms(x->d, SYM_NOTES[i], (long*) &num_ratios, &ratio_doubles);
-            
-            //get the doubles from the t_atom*
-            atom_getdouble_array(num_ratios, ratio_doubles, num_ratios, x->ratio_list[i].ratio_arr);
-            x->ratio_list[i].active_ratio = 0;
-            
-            //free the t_atom*
-            sysmem_freeptr(ratio_doubles);
+            x->dict_processed = true;
+            for (int i = 0; i < NUM_NOTE_RATIOS; i++){
+                long num_ratios;
+                
+                //init the note init dict
+                t_dictionary* note_init_d;
+                
+                //get number of ratios for this note from the init dictionary embedded in the init dict
+                if (dictionary_getdictionary(init_d, SYM_NOTES[i], (t_object**) &note_init_d) == MAX_ERR_NONE){
+                    dictionary_getlong(note_init_d, SYM_RATIOS, (t_atom_long*) &num_ratios);
+                    
+                    //set the number of ratios and init the array of ratios
+                    x->ratio_list[i].len = num_ratios;
+                    x->ratio_list[i].ratio_arr = (double*) malloc(sizeof(double) * num_ratios);
+                    
+                    t_atom* ratio_doubles = NULL;
+                    //get the ratios into an atom array
+                    dictionary_copyatoms(x->d, SYM_NOTES[i], (long*) &num_ratios, &ratio_doubles);
+                    
+                    //get the doubles from the t_atom*
+                    atom_getdouble_array(num_ratios, ratio_doubles, num_ratios, x->ratio_list[i].ratio_arr);
+                    x->ratio_list[i].active_ratio = 0;
+                    
+                    //free the t_atom*
+                    sysmem_freeptr(ratio_doubles);
+                    
+                } else {
+                    x->dict_processed = false;
+                    out_error(x, gensym("Note dict loading: "), get_err_msg(e));
+                }
+            }
+            post("Tuning file %s loaded.", *filename);
+        } else {
+            out_error(x, gensym("init dictionary loading: "), gensym("loading INIT dictionary"));
         }
         
-        x->dict_processed = true;
+        object_free((void*) x->d);
     }
+    free(*filename);
+    free(filename);
 }
 
 
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv){
+    //if the dictionary was succesfully read
     if (x->dict_processed){
         t_atom_long note = -1;
         t_atom_long ratio_index = -1;
@@ -257,10 +366,25 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
             
             //if we were able to load both values and they're valid
             if (note > -1 && ratio_index > -1){
+                x->ratio_list[note].active_ratio = ratio_index;
+                
                 //if the note we're changing is active, calculate the new pitchbend and send it out
-                if (x->note_mod_index[note] != -1){
-                    x->notes[x->note_mod_index[note]][PITCHBEND] = calculate_pitchbend(note, x->ratio_list[note].ratio_arr[ratio_index]);
-                    update_pb(x, x->note_mod_index[note]);
+                if (x->mod_note_num_active[note] > 0){
+                    double pitchbend = 0;
+                    
+                    //but double check array sanity
+                    if (x->ratio_list[note].ratio_arr != NULL){
+                        pitchbend = calculate_pitchbend(note, x->ratio_list[note].ratio_arr[ratio_index]);
+                    } else {
+                        out_error(x, gensym("Process ratio change: "), gensym("ratio_arr is null"));
+                    }
+                    
+                    //set all octaved versions of this note to the same pitchbend
+                    for (int i = 0; i < x->mod_note_num_active[note]; i++){
+                        uint8_t note_idx = x->mod_note_index[note][i];
+                        x->notes[note_idx][PITCHBEND] = pitchbend;
+                        update_pb(x, note_idx);
+                    }
                 }
             }
         }
@@ -277,14 +401,20 @@ double calculate_pitchbend(long mod_note_index, double ratio){
 }
     
 
+//function that frees all allocated memory
 void denote_microtonal_free(t_denote_microtonal* x){
     for (int i = 0; i < NUM_NOTE_RATIOS; i++){
-        free(x->ratio_list[i].ratio_arr);
+        if (x->ratio_list[i].ratio_arr != NULL){
+            free(x->ratio_list[i].ratio_arr);
+        }
     }
     
-    sysmem_freeptr((void*) x->d);
-    sysmem_freeptr((void*) SYM_NOTES);
-    sysmem_freeptr(x->out);
+    if (x->d != NULL){
+        sysmem_freeptr((void*) x->d);
+    }
+    
+    sysmem_freeptr((void**) SYM_NOTES);
 }
+
 
 

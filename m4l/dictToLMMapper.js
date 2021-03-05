@@ -10,7 +10,7 @@ function dict(v){
     var keys = init.getkeys();
 	
     for (var i = 0; i < keys.length; i++){
-        var lm = p.getnamed(rng + "lm_" + keys[i]);
+        var lm = p.getnamed(rng + "lm_" + i);
 		
         var note_object = init.get(keys[i]);
         var num_ratios = note_object.get("ratios");

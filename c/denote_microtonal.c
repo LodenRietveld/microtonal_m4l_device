@@ -4,7 +4,7 @@
 #include "ext_dictionary.h"
 
 #define NUM_NOTE_RATIOS 12
-#define MAX_CHORD_SIZE 8
+#define MAX_CHORD_SIZE 15
 
 const char notenames[12][3] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
@@ -26,12 +26,11 @@ typedef struct _denote_microtonal {
     ratio_list_t ratio_list[NUM_NOTE_RATIOS];
     bool dict_processed;
     t_dictionary* d;
+    t_symbol* dictionary_path;
     bool mpe;
 } t_denote_microtonal;
 
 #define SEMITONE    0.059463
-
-#define LENGTH      8
 
 #define NOTE        0
 #define VELOCITY    1
@@ -65,6 +64,8 @@ void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, c
 void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_free(t_denote_microtonal* x);
 
+void denote_microtonal_check_dict_state(t_denote_microtonal* x);
+
 
 t_class *denote_microtonal_class;
 
@@ -82,7 +83,11 @@ void ext_main(void *r)
     class_addmethod(c, (method)denote_microtonal_process_ratio_change,  "set_ratio",    A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_set_key,               "set_key",      A_LONG, 0);
 	class_addmethod(c, (method)denote_microtonal_assist,	            "assist",	    A_CANT, 0);
-
+    class_addmethod(c, (method)denote_microtonal_check_dict_state,      "bang",         A_NOTHING, 0);
+    
+    CLASS_ATTR_SYM(c, "Dictionary path", ATTR_SET_OPAQUE_USER, t_denote_microtonal, dictionary_path);
+    CLASS_ATTR_SAVE(c, "Dictionary path", 0);
+    
 	class_register(CLASS_BOX, c);
 	denote_microtonal_class = c;
     
@@ -153,7 +158,7 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
         x->mpe = false;
     }
     
-    for (short i = 0; i < LENGTH+1; i++){
+    for (short i = 0; i < MAX_CHORD_SIZE+1; i++){
         x->out[i] = listout(x);
     }
     
@@ -170,7 +175,11 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
     memset(x->chordElementRouting, -1, sizeof(int) * MAX_CHORD_SIZE);
     x->dict_processed = false;
     x->key_offset = 0;
-	return(x);
+    
+    x->dictionary_path = gensym("no path");
+    
+    
+	return x;
 }
 
 
@@ -219,7 +228,7 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
         bool found = false;
         
         int index = -1;
-        for (int i = LENGTH-1; i >= 0; i--){
+        for (int i = MAX_CHORD_SIZE-1; i >= 0; i--){
             if (x->chordElementRouting[i] == -1 && index == -1){
                 index = i;
             } else if (x->chordElementRouting[i] == note){
@@ -284,27 +293,22 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
     }
 }
 
-
-
-void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
-    t_fourcc outtype;
-    char** filename;
-    long size = 100;
+void read_dictionary(t_denote_microtonal* x, char* name, long size){
     short path;
+    t_fourcc outtype;
+    char* filename_path = (char*) malloc(sizeof(char) * size);
     
-    filename = (char**) malloc(sizeof(char*));
-    *filename = (char*) malloc(sizeof(char) * size);
-    atom_gettext(argc, argv, &size, filename, 0);
+    memcpy(filename_path, name, size);
     
     x->dict_processed = false;
     
-    if (locatefile_extended(*filename, &path, &outtype, NULL, 0)) { // non-zero: not found
-        object_error((t_object*) x, "%s: not found", s->s_name);
+    if (locatefile_extended(name, &path, &outtype, NULL, 0)) { // non-zero: not found
+        object_error((t_object*) x, "Dictionary at path %s not found", filename_path);
         return;
     }
     
     
-    if (dictionary_read(*filename, path, &x->d) == MAX_ERR_NONE){
+    if (dictionary_read(name, path, &x->d) == MAX_ERR_NONE){
         //init the init dict
         t_dictionary* init_d;
         t_max_err e;
@@ -320,7 +324,7 @@ void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long
                 t_dictionary* note_init_d;
                 
                 //get number of ratios for this note from the init dictionary embedded in the init dict
-                if (dictionary_getdictionary(init_d, SYM_NOTES[i], (t_object**) &note_init_d) == MAX_ERR_NONE){
+                if ((e = dictionary_getdictionary(init_d, SYM_NOTES[i], (t_object**) &note_init_d)) == MAX_ERR_NONE){
                     dictionary_getlong(note_init_d, SYM_RATIOS, (t_atom_long*) &num_ratios);
                     
                     //set the number of ratios and init the array of ratios
@@ -343,13 +347,37 @@ void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long
                     out_error(x, gensym("Note dict loading: "), get_err_msg(e));
                 }
             }
-            post("Tuning file %s loaded.", *filename);
+            post("Tuning file %s loaded.", name);
+            
+            t_atom out[2];
+            
+            atom_setsym(out, gensym("loaded"));
+            atom_setsym(out+1, gensym("bang"));
+            outlet_list(x->out[0], NULL, 2, out);
+            
+            x->dictionary_path = gensym(filename_path);
         } else {
             out_error(x, gensym("init dictionary loading: "), gensym("loading INIT dictionary"));
         }
         
         object_free((void*) x->d);
     }
+    
+    free(filename_path);
+}
+
+
+
+void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
+    char** filename;
+    long size = 100;
+    
+    filename = (char**) malloc(sizeof(char*));
+    *filename = (char*) malloc(sizeof(char) * size);
+    
+    atom_gettext(argc, argv, &size, filename, 0);
+    
+    read_dictionary(x, *filename, size);
     free(*filename);
     free(filename);
 }
@@ -417,6 +445,14 @@ void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
     }
     
     x->key_offset = key_idx;
+}
+
+
+
+void denote_microtonal_check_dict_state(t_denote_microtonal* x){
+    if (x->dictionary_path != gensym("no path")){
+        read_dictionary(x, x->dictionary_path->s_name, strlen(x->dictionary_path->s_name));
+    }
 }
     
 

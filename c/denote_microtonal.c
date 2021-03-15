@@ -14,6 +14,11 @@ typedef struct ratio_list {
     long active_ratio;
 } ratio_list_t;
 
+enum operation {
+    SUB = 0,
+    ADD
+};
+
 typedef struct _denote_microtonal {
 	t_object p_ob;
     void *out[MAX_CHORD_SIZE+1];
@@ -29,7 +34,7 @@ typedef struct _denote_microtonal {
     t_dictionary* d;
     t_symbol* dictionary_path;
     bool mpe;
-    long param_vis;
+    bool dbg;
 } t_denote_microtonal;
 
 #define SEMITONE    0.059463
@@ -46,6 +51,7 @@ t_symbol* SYM_INIT;
 t_symbol* SYM_PB;
 t_symbol* SYM_RATIOS;
 t_symbol* SYM_NAMES;
+t_symbol* SYM_DBG;
 
 t_symbol* max_err_inv_sym;
 t_symbol* max_err_none_sym;
@@ -67,6 +73,11 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_free(t_denote_microtonal* x);
 
 void denote_microtonal_check_dict_state(t_denote_microtonal* x);
+
+long correct_interval_or_note_with_key(t_denote_microtonal* x, long mod_note, enum operation o);
+long interval_to_note(t_denote_microtonal* x, long interval);
+long note_to_interval(t_denote_microtonal* x, long note);
+
 
 
 t_class *denote_microtonal_class;
@@ -101,6 +112,7 @@ void ext_main(void *r)
     SYM_PB = gensym("pb");
     SYM_RATIOS = gensym("ratios");
     SYM_NAMES = gensym("names");
+    SYM_DBG = gensym("debug");
     
     max_err_inv_sym = gensym("Invalid error code");
     max_err_none_sym = gensym("No error");
@@ -153,12 +165,28 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
 	t_denote_microtonal *x;
 	x = (t_denote_microtonal *)object_alloc(denote_microtonal_class);
     
-    if (argc == 1 && atom_getsym(argv) == SYM_MPE){
-        post("MPE enabled");
-        x->mpe = true;
+    
+    if (argc > 1){
+        for (int i = 0; i < argc; i++){
+            t_symbol* recv;
+            t_max_err res = atom_arg_getsym(&recv, i, argc, argv);
+            if (res == MAX_ERR_NONE && recv == SYM_MPE){
+                x->mpe = true;
+            } else if (res == MAX_ERR_NONE && recv == SYM_DBG){
+                x->dbg = true;
+            }
+        }
     } else {
-        post("MPE disabled");
-        x->mpe = false;
+    
+        if (argc == 1 && atom_getsym(argv) == SYM_MPE){
+            post("MPE enabled");
+            x->mpe = true;
+        } else {
+            post("MPE disabled");
+            x->mpe = false;
+        }
+        
+        x->dbg = atom_getsym(argv) == SYM_DBG;
     }
     
     for (short i = 0; i < MAX_CHORD_SIZE+1; i++){
@@ -222,6 +250,15 @@ void send_chord(t_denote_microtonal *x, long changed){
     outlet_list(x->out[changed+1], NULL, 3, x->list_out);
 }
 
+void dbg_out(t_denote_microtonal* x, char* msg){
+    t_atom l[2];
+    atom_setsym(l, SYM_DBG);
+    t_symbol* s = gensym(msg);
+    atom_setsym(l+1, s);
+    
+    outlet_list(x->out[0], NULL, 2, l);
+}
+
 void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
     if (argc == 2){
         long note = atom_getlong(argv);
@@ -277,7 +314,7 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
             //if the dictionary has been successfully read
             if (x->dict_processed){
                 //get the correct ratio list
-                ratio_list_t* rl = &x->ratio_list[mod_note];
+                ratio_list_t* rl = &x->ratio_list[note_to_interval(x, mod_note)];
                 
                 //if it's not null, calculate the pitchbend. Otherwise set pitchbend to 0 and log an error
                 if (rl->ratio_arr != NULL){
@@ -392,32 +429,60 @@ void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv){
     //if the dictionary was succesfully read
     if (x->dict_processed){
-        t_atom_long note = -1;
+        t_atom_long interval = -1;
         t_atom_long ratio_index = -1;
+        
+        if (x->dbg){
+            dbg_out(x, "ratio_change: dict processed");
+        }
         
         if (argc == 2){
             //get the values from the argument list
-            atom_arg_getlong(&note, 0, 2, argv);
+            atom_arg_getlong(&interval, 0, 2, argv);
             atom_arg_getlong(&ratio_index, 1, 2, argv);
             
+            long key_corrected_note = interval_to_note(x, interval);
+            
+            if (x->dbg){
+                char buf[80];
+                sprintf(buf, "ratio change: interval: %"PRId64", note: %ld, ratio_index %"PRId64, interval, key_corrected_note, ratio_index);
+                dbg_out(x, buf);
+            }
+            
             //if we were able to load both values and they're valid
-            if (note > -1 && ratio_index > -1){
-                x->ratio_list[note].active_ratio = ratio_index;
+            if (interval > -1 && ratio_index > -1){
+                x->ratio_list[interval].active_ratio = ratio_index;
+                
+                if (x->dbg){
+                    char buf[80];
+                    sprintf(buf, "note and ratio valid, number active notes: %ld", x->mod_note_num_active[key_corrected_note]);
+                    dbg_out(x, buf);
+                }
                 
                 //if the note we're changing is active, calculate the new pitchbend and send it out
-                if (x->mod_note_num_active[note] > 0){
+                if (x->mod_note_num_active[key_corrected_note] > 0){
                     double pitchbend = 0;
                     
+                    if (x->dbg){
+                        dbg_out(x, "more than one note active");
+                    }
+                    
                     //but double check array sanity
-                    if (x->ratio_list[note].ratio_arr != NULL){
-                        pitchbend = calculate_pitchbend(x, note);
+                    if (x->ratio_list[key_corrected_note].ratio_arr != NULL){
+                        pitchbend = calculate_pitchbend(x, key_corrected_note);
+                        
+                        if (x->dbg){
+                            char buf[40];
+                            sprintf(buf, "ratio change: pitchbend: %f", pitchbend);
+                            dbg_out(x, buf);
+                        }
                     } else {
                         out_error(x, gensym("Process ratio change: "), gensym("ratio_arr is null"));
                     }
                     
                     //set all octaved versions of this note to the same pitchbend
-                    for (int i = 0; i < x->mod_note_num_active[note]; i++){
-                        uint8_t note_idx = x->mod_note_index[note][i];
+                    for (int i = 0; i < x->mod_note_num_active[key_corrected_note]; i++){
+                        uint8_t note_idx = x->mod_note_index[key_corrected_note][i];
                         x->notes[note_idx][PITCHBEND] = pitchbend;
                         send_pb(x, note_idx);
                     }
@@ -429,15 +494,12 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
 
 double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index){
     //calculate the "regular" tempered interval
-    long key_corrected_mod_note = mod_note_index - x->key_offset;
-    if (key_corrected_mod_note < 0){
-        key_corrected_mod_note += 12;
-    }
-    double tempered_interval = pow(2, key_corrected_mod_note / 12.);
+    long key_corrected_interval = note_to_interval(x, mod_note_index);
+    double tempered_interval = pow(2, key_corrected_interval / 12.);
     
     double ratio;
-    if (x->ratio_list[key_corrected_mod_note].ratio_arr != NULL){
-        ratio = x->ratio_list[key_corrected_mod_note].ratio_arr[x->ratio_list[key_corrected_mod_note].active_ratio];
+    if (x->ratio_list[key_corrected_interval].ratio_arr != NULL){
+        ratio = x->ratio_list[key_corrected_interval].ratio_arr[x->ratio_list[key_corrected_interval].active_ratio];
     } else {
         return 0;
     }
@@ -465,6 +527,36 @@ void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
             }
         }
     }
+}
+
+long interval_to_note(t_denote_microtonal* x, long interval){
+    return correct_interval_or_note_with_key(x, interval, ADD);
+}
+
+long note_to_interval(t_denote_microtonal* x, long note){
+    return correct_interval_or_note_with_key(x, note, SUB);
+}
+
+long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum operation o){
+    
+    long key_corrected_value;
+    
+    switch(o){
+        case SUB: {
+            key_corrected_value = input - x->key_offset;
+            if (key_corrected_value < 0){
+                key_corrected_value += 12;
+            }
+            break;
+        }
+        case ADD: {
+            key_corrected_value = input + x->key_offset;
+            key_corrected_value = key_corrected_value % 12;
+        }
+    }
+    
+    
+    return key_corrected_value;
 }
 
 

@@ -23,11 +23,13 @@ typedef struct _denote_microtonal {
     long key_offset;
     t_atom list_out[3];
     int chordElementRouting[MAX_CHORD_SIZE];
+    int nr_active_notes;
     ratio_list_t ratio_list[NUM_NOTE_RATIOS];
     bool dict_processed;
     t_dictionary* d;
     t_symbol* dictionary_path;
     bool mpe;
+    long param_vis;
 } t_denote_microtonal;
 
 #define SEMITONE    0.059463
@@ -87,6 +89,7 @@ void ext_main(void *r)
     
     CLASS_ATTR_SYM(c, "Dictionary path", ATTR_SET_OPAQUE_USER, t_denote_microtonal, dictionary_path);
     CLASS_ATTR_SAVE(c, "Dictionary path", 0);
+
     
 	class_register(CLASS_BOX, c);
 	denote_microtonal_class = c;
@@ -175,6 +178,7 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
     memset(x->chordElementRouting, -1, sizeof(int) * MAX_CHORD_SIZE);
     x->dict_processed = false;
     x->key_offset = 0;
+    x->nr_active_notes = 0;
     
     x->dictionary_path = gensym("no path");
     
@@ -201,7 +205,7 @@ void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, c
 	}
 }
 
-void update_pb(t_denote_microtonal *x, long index){
+void send_pb(t_denote_microtonal *x, long index){
     t_atom l[2];
     
     atom_setsym(l, SYM_PB);
@@ -255,6 +259,7 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
             
             x->notes[index][NOTE] = note;
             x->notes[index][VELOCITY] = vel;
+            x->nr_active_notes--;
         //if it does not yet exist, and there's still space, add the note to all lists
         } else if (!found && add && index != -1){
             changed = index;
@@ -267,6 +272,7 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
             
             x->notes[index][NOTE] = note;
             x->notes[index][VELOCITY] = vel;
+            x->nr_active_notes++;
             
             //if the dictionary has been successfully read
             if (x->dict_processed){
@@ -413,7 +419,7 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
                     for (int i = 0; i < x->mod_note_num_active[note]; i++){
                         uint8_t note_idx = x->mod_note_index[note][i];
                         x->notes[note_idx][PITCHBEND] = pitchbend;
-                        update_pb(x, note_idx);
+                        send_pb(x, note_idx);
                     }
                 }
             }
@@ -429,7 +435,12 @@ double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index){
     }
     double tempered_interval = pow(2, key_corrected_mod_note / 12.);
     
-    double ratio = x->ratio_list[key_corrected_mod_note].ratio_arr[x->ratio_list[key_corrected_mod_note].active_ratio];
+    double ratio;
+    if (x->ratio_list[key_corrected_mod_note].ratio_arr != NULL){
+        ratio = x->ratio_list[key_corrected_mod_note].ratio_arr[x->ratio_list[key_corrected_mod_note].active_ratio];
+    } else {
+        return 0;
+    }
     
     //calculate the difference between the just ratio and the tempered ratio by dividing them
     //98304 is 8192 * 12, to scale the difference to + and - 1 semitone
@@ -445,6 +456,15 @@ void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
     }
     
     x->key_offset = key_idx;
+    
+    if (x->nr_active_notes > 0){
+        for (int i = 0; i < MAX_CHORD_SIZE; i++){
+            if (x->chordElementRouting[i] != -1 && x->dict_processed){
+                x->notes[i][PITCHBEND] = calculate_pitchbend(x, x->notes[i][NOTE] % 12);
+                send_pb(x, i);
+            }
+        }
+    }
 }
 
 

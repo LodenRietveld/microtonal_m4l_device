@@ -4,7 +4,7 @@
 #include "ext_dictionary.h"
 
 #define NUM_NOTE_RATIOS 12
-#define MAX_CHORD_SIZE 15
+#define MAX_VOICES 15
 
 const char notenames[12][3] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 
@@ -19,30 +19,35 @@ enum operation {
     ADD
 };
 
+enum note_operation {
+    NOTE_DELETE,
+    NOTE_ADD
+};
+
 typedef struct _denote_microtonal {
-	t_object p_ob;
-    void *out[MAX_CHORD_SIZE+1];
-    long notes[MAX_CHORD_SIZE][3];
-    long mod_note_num_active[NUM_NOTE_RATIOS];
-    long mod_note_index[NUM_NOTE_RATIOS][MAX_CHORD_SIZE];           //array that stores the current note voice (if active), otherwise -1
-    long key_offset;
-    t_atom list_out[3];
-    int chordElementRouting[MAX_CHORD_SIZE];
-    int nr_active_notes;
-    ratio_list_t ratio_list[NUM_NOTE_RATIOS];
-    bool dict_processed;
-    t_dictionary* d;
-    t_symbol* dictionary_path;
-    bool mpe;
-    bool dbg;
+	t_object p_ob;                                                          //the internal max object stuff
+    void *out[MAX_VOICES+1];                                                //array of outlets
+    long notes[MAX_VOICES][3];                                              //array of active notes
+    long mod_note_num_active[NUM_NOTE_RATIOS];                              //array active count per note (for tracking octaves that all need to be pitched when the ratio changes)
+    long mod_note_to_voice_mapping[NUM_NOTE_RATIOS][MAX_VOICES];            //array that stores the current note voice (if active), otherwise -1
+    long key_offset;                                                        //the key that we're in
+    t_atom list_out[3];                                                     //the list of output values (reuse for some efficiency)
+    int voices[MAX_VOICES];                                                 //the current voices (index into this array is the voice, the value at that index is the midi note corresponding to it)
+    int nr_active_notes;                                                    //the number of currently active notes
+    ratio_list_t ratio_list[NUM_NOTE_RATIOS];                               //a list of ratios loaded from the dictionary, see @struct ratio_list_t for contents
+    bool dict_processed;                                                    //a bool that keeps track of whether we succesfully loaded and processed a dictionary
+    t_dictionary* d;                                                        //a pointer to the dictionary that we're loading
+    t_symbol* dictionary_path;                                              //the path to the dictionary we're using (used by attribute "Dictionary path" for saving the dictionary we use for this instance)
+    bool mpe;                                                               //a bool that tracks whether we're using MPE
+    bool dbg;                                                               //a bool that tracks if we're in debug mode
 } t_denote_microtonal;
 
-#define SEMITONE    0.059463
-
+//indices into the t_denote_microtonal.notes array
 #define NOTE        0
 #define VELOCITY    1
 #define PITCHBEND   2
 
+//some commonly used symbols
 t_symbol* SYM_MPE;
 t_symbol* SYM_NOTE;
 t_symbol* SYM_LOADDICT;
@@ -53,6 +58,7 @@ t_symbol* SYM_RATIOS;
 t_symbol* SYM_NAMES;
 t_symbol* SYM_DBG;
 
+//maxx error message symbols for tracking errors during dictionary loading
 t_symbol* max_err_inv_sym;
 t_symbol* max_err_none_sym;
 t_symbol* max_err_generic_sym;
@@ -60,14 +66,14 @@ t_symbol* max_err_inv_ptr_sym;
 t_symbol* max_err_dupl_sym;
 t_symbol* max_err_mem_sym;
 
-
+//forward funcition declarations
 double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index);
 int find_note_index(t_denote_microtonal* x, uint8_t note);
 
 void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx);
 void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv);
-void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
+void denote_microtonal_process_incoming_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, char *s);
 void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv);
 void denote_microtonal_free(t_denote_microtonal* x);
@@ -91,7 +97,7 @@ void ext_main(void *r)
 
 	c = class_new("denote_microtonal", (method)denote_microtonal_new, (method)denote_microtonal_free, sizeof(t_denote_microtonal), 0L, A_GIMME, 0);
 
-    class_addmethod(c, (method)denote_microtonal_note_list,             "note",         A_GIMME, 0);
+    class_addmethod(c, (method)denote_microtonal_process_incoming_note_list,             "note",         A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_read_dictionary,       "loaddict",     A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_process_ratio_change,  "set_ratio",    A_GIMME, 0);
     class_addmethod(c, (method)denote_microtonal_set_key,               "set_key",      A_LONG, 0);
@@ -125,7 +131,7 @@ void ext_main(void *r)
     post("version: %s :: %s", __DATE__, __TIME__, 0);
 }
 
-
+//function that returns a symbol based on a max error message
 t_symbol* get_err_msg(t_max_err e){
     switch(e){
         case MAX_ERR_NONE:
@@ -149,6 +155,9 @@ t_symbol* get_err_msg(t_max_err e){
     }
 }
 
+/*
+ * Util function that sends out an error message precede by the symbol "error"
+ */
 void out_error(t_denote_microtonal* x, t_symbol* loc, t_symbol* err_msg){
     t_atom err[3];
     atom_setsym(err, gensym("error"));
@@ -160,12 +169,16 @@ void out_error(t_denote_microtonal* x, t_symbol* loc, t_symbol* err_msg){
 
 //--------------------------------------------------------------------------
 
+/*
+ * Object instantiation function
+ */
 void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
 {
+    //create the object
 	t_denote_microtonal *x;
 	x = (t_denote_microtonal *)object_alloc(denote_microtonal_class);
     
-    
+    //check arguments for "debug" or "mpe", order doesn't matter
     if (argc > 1){
         for (int i = 0; i < argc; i++){
             t_symbol* recv;
@@ -177,39 +190,44 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
             }
         }
     } else {
-    
+        
+        //check argument for "debug" or "mpe"
         if (argc == 1 && atom_getsym(argv) == SYM_MPE){
             post("MPE enabled");
             x->mpe = true;
         } else {
             post("MPE disabled");
             x->mpe = false;
+            x->dbg = atom_getsym(argv) == SYM_DBG;
         }
         
-        x->dbg = atom_getsym(argv) == SYM_DBG;
     }
     
-    for (short i = 0; i < MAX_CHORD_SIZE+1; i++){
+    //init object outlets
+    for (short i = 0; i < MAX_VOICES+1; i++){
         x->out[i] = listout(x);
     }
     
-    
+    //alloc and fill the sym_notes array
     SYM_NOTES = (t_symbol**) sysmem_newptr(sizeof(t_symbol*) * NUM_NOTE_RATIOS);
     
     for (int i = 0; i < NUM_NOTE_RATIOS; i++){
         SYM_NOTES[i] = gensym(notenames[i]);
     }
     
+    //init the modulo voice mapping to -1
     for (int i = 0; i < NUM_NOTE_RATIOS; i++){
-        memset(x->mod_note_index[i], -1, sizeof(long) * MAX_CHORD_SIZE);
+        memset(x->mod_note_to_voice_mapping[i], -1, sizeof(long) * MAX_VOICES);
     }
-    memset(x->chordElementRouting, -1, sizeof(int) * MAX_CHORD_SIZE);
+    //init the voices to -1
+    memset(x->voices, -1, sizeof(int) * MAX_VOICES);
+    
     x->dict_processed = false;
     x->key_offset = 0;
     x->nr_active_notes = 0;
     
+    //on object loading set the dict path to "no path". If used in a m4l device, the state will be restored and this dictionary path will be set to the value in the attribute "Dictionary path"
     x->dictionary_path = gensym("no path");
-    
     
 	return x;
 }
@@ -217,22 +235,28 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
 
 //--------------------------------------------------------------------------
 
+/*
+ * Assist outlet function
+ */
 void denote_microtonal_assist(t_denote_microtonal *x, void *b, long m, long a, char *s)
 {
-    if (m == ASSIST_OUTLET && a < MAX_CHORD_SIZE){
+    if (m == ASSIST_OUTLET && a < MAX_VOICES){
 		sprintf(s,"List of midi note, velocity and pitchbend, or list of 'pb' and pitchbend for midi channel %ld", a);
-    } else if (a == MAX_CHORD_SIZE){
-        sprintf(s, "Error outlet. Puts out any errors encountered in a list");
+    } else if (a == MAX_VOICES){
+        sprintf(s, "Error, loaded and debug outlet. Puts out any errors encountered in a list precede by \"error\", bang when the dictionary has been loaded preceded by \"loaded\", outputs debug info preceded by \"debug\"");
     }
 	else {
 		switch (a) {
 		case 0:
-			sprintf(s,"Inlet %ld: list. See helpfile for possible messages", a);
+            sprintf(s,"Inlet %ld: list. See helpfile for available messages", a);
 			break;
 		}
 	}
 }
 
+/*
+ * Function that sends pitchbend out of the given index's outlet, preceded by the symbol "pb"
+ */
 void send_pb(t_denote_microtonal *x, long index){
     t_atom l[2];
     
@@ -242,7 +266,10 @@ void send_pb(t_denote_microtonal *x, long index){
     outlet_list(x->out[index+1], NULL, 2, l);
 }
 
-void send_chord(t_denote_microtonal *x, long changed){
+/*
+ * Function that sends a note/velocity/pitchbend trio from the outlet at index [changed]
+ */
+void send_note(t_denote_microtonal *x, long changed){
     atom_setlong(x->list_out+NOTE, x->notes[changed][NOTE]);
     atom_setlong(x->list_out+VELOCITY, x->notes[changed][VELOCITY]);
     atom_setlong(x->list_out+PITCHBEND, x->notes[changed][PITCHBEND]);
@@ -250,6 +277,9 @@ void send_chord(t_denote_microtonal *x, long changed){
     outlet_list(x->out[changed+1], NULL, 3, x->list_out);
 }
 
+/*
+ * Function that sends a debug message out of its debug outlet (rightmost), preceded by symbol "debug"
+ */
 void dbg_out(t_denote_microtonal* x, char* msg){
     t_atom l[2];
     atom_setsym(l, SYM_DBG);
@@ -259,20 +289,25 @@ void dbg_out(t_denote_microtonal* x, char* msg){
     outlet_list(x->out[0], NULL, 2, l);
 }
 
-void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
+/*
+ * Function that is called when a message with symbol "note" is sent to the object. Is responsible for keeping track of/adding/deleting notes in the object
+ */
+void denote_microtonal_process_incoming_note_list(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
     if (argc == 2){
         long note = atom_getlong(argv);
-        uint8_t mod_note = note % 12;
         long vel = atom_getlong(argv+1);
+        //get the modulo note for ratio selection purposes
+        uint8_t mod_note = note % 12;
         uint8_t changed = 0;
-        bool add = (vel > 0);
+        enum note_operation op = vel > 0 ? NOTE_ADD : NOTE_DELETE;
         bool found = false;
         
         int index = -1;
-        for (int i = MAX_CHORD_SIZE-1; i >= 0; i--){
-            if (x->chordElementRouting[i] == -1 && index == -1){
+        //loop through the currently saved notes to find one with index -1 (an unpopulated spot)
+        for (int i = MAX_VOICES-1; i >= 0; i--){
+            if (x->voices[i] == -1 && index == -1){
                 index = i;
-            } else if (x->chordElementRouting[i] == note){
+            } else if (x->voices[i] == note){
                 found = true;
                 index = i;
                 break;
@@ -285,10 +320,10 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
         }
         
         //if the note already exists and the velocity is 0 (or lower), remove it from all arrays tracking it
-        if (found && !add){
+        if (found && op == NOTE_DELETE){
             changed = index;
-            x->chordElementRouting[index] = -1;
-            x->mod_note_index[mod_note][x->mod_note_num_active[mod_note]] = -1;
+            x->voices[index] = -1;
+            x->mod_note_to_voice_mapping[mod_note][x->mod_note_num_active[mod_note]] = -1;
             
             if (x->mod_note_num_active[mod_note] > 0){
                 x->mod_note_num_active[mod_note]--;
@@ -298,12 +333,13 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
             x->notes[index][VELOCITY] = vel;
             x->nr_active_notes--;
         //if it does not yet exist, and there's still space, add the note to all lists
-        } else if (!found && add && index != -1){
+        } else if (!found && (op == NOTE_ADD) && index != -1){
             changed = index;
-            x->chordElementRouting[index] = note;
-            x->mod_note_index[mod_note][x->mod_note_num_active[mod_note]] = index;
+            //save the entered note to this voice
+            x->voices[index] = note;
+            x->mod_note_to_voice_mapping[mod_note][x->mod_note_num_active[mod_note]] = index;
             
-            if (x->mod_note_num_active[mod_note] < MAX_CHORD_SIZE){
+            if (x->mod_note_num_active[mod_note] < MAX_VOICES){
                 x->mod_note_num_active[mod_note]++;
             }
             
@@ -327,15 +363,18 @@ void denote_microtonal_note_list(t_denote_microtonal *x, t_symbol *s, long argc,
                 x->notes[index][PITCHBEND] = 0;
             }
         //if it already exists and velocity > 0, just change the velocity
-        } else if (found && add){
+        } else if (found && op == NOTE_ADD){
             changed = index;
             x->notes[index][VELOCITY] = vel;
         }
         
-        send_chord(x, changed);
+        send_note(x, changed);
     }
 }
 
+/*
+ * Function that reads the dictionary at path [name], allocates [size] bytes of memory for the path to be stored in
+ */
 void read_dictionary(t_denote_microtonal* x, char* name, long size){
     short path;
     t_fourcc outtype;
@@ -392,6 +431,7 @@ void read_dictionary(t_denote_microtonal* x, char* name, long size){
             }
             post("Tuning file %s loaded.", name);
             
+            //send out a bang to reload existing ratio settings etc
             t_atom out[2];
             
             atom_setsym(out, gensym("loaded"));
@@ -410,7 +450,9 @@ void read_dictionary(t_denote_microtonal* x, char* name, long size){
 }
 
 
-
+/*
+ * Function that is called when the object receives the message "loaddict", does some preparatory allocation
+ */
 void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
     char** filename;
     long size = 100;
@@ -425,7 +467,9 @@ void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long
     free(filename);
 }
 
-
+/*
+ * Function that is called when the message "set_ratio" is sent to the object. It should have the interval (0-11) and the selected ratio after the first symbol;
+ */
 void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s, long argc, t_atom *argv){
     //if the dictionary was succesfully read
     if (x->dict_processed){
@@ -450,7 +494,7 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
             }
             
             //if we were able to load both values and they're valid
-            if (interval > -1 && ratio_index > -1){
+            if (interval > -1 && ratio_index > -1 && interval < 12 && ratio_index < x->ratio_list[interval].len){
                 x->ratio_list[interval].active_ratio = ratio_index;
                 
                 if (x->dbg){
@@ -482,7 +526,7 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
                     
                     //set all octaved versions of this note to the same pitchbend
                     for (int i = 0; i < x->mod_note_num_active[key_corrected_note]; i++){
-                        uint8_t note_idx = x->mod_note_index[key_corrected_note][i];
+                        uint8_t note_idx = x->mod_note_to_voice_mapping[key_corrected_note][i];
                         x->notes[note_idx][PITCHBEND] = pitchbend;
                         send_pb(x, note_idx);
                     }
@@ -492,11 +536,17 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
     }
 }
 
+
+/*
+ * Function that calculates the pitchbend based on the ratio found in the dictionary
+ */
 double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index){
-    //calculate the "regular" tempered interval
+    //get the interval from the note index (based on the key)
     long key_corrected_interval = note_to_interval(x, mod_note_index);
+    //calculate the "regular" tempered interval
     double tempered_interval = pow(2, key_corrected_interval / 12.);
     
+    //get the ratio
     double ratio;
     if (x->ratio_list[key_corrected_interval].ratio_arr != NULL){
         ratio = x->ratio_list[key_corrected_interval].ratio_arr[x->ratio_list[key_corrected_interval].active_ratio];
@@ -505,23 +555,29 @@ double calculate_pitchbend(t_denote_microtonal* x, long mod_note_index){
     }
     
     //calculate the difference between the just ratio and the tempered ratio by dividing them
-    //98304 is 8192 * 12, to scale the difference to + and - 1 semitone
+    //98304 is 8192 (14-bit pitchbend) * 12 (semitones), to scale the difference to + and - 1 semitone (since the ratio difference is scaled to an octave)
     return 98304 * log2(ratio / tempered_interval);
 }
 
 
+/*
+ * Function that is called when the object receives the message "set_key", followed by a number between 0 and 11 inclusive
+ */
 void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
+    //clip the key values
     if (key_idx < 0){
         key_idx = 0;
     } else if (key_idx > 11){
         key_idx = 11;
     }
     
+    //set the key offset
     x->key_offset = key_idx;
     
+    //send out pitchbend when the key changes for some ~wacky~ effects
     if (x->nr_active_notes > 0){
-        for (int i = 0; i < MAX_CHORD_SIZE; i++){
-            if (x->chordElementRouting[i] != -1 && x->dict_processed){
+        for (int i = 0; i < MAX_VOICES; i++){
+            if (x->voices[i] != -1 && x->dict_processed){
                 x->notes[i][PITCHBEND] = calculate_pitchbend(x, x->notes[i][NOTE] % 12);
                 send_pb(x, i);
             }
@@ -529,14 +585,23 @@ void denote_microtonal_set_key(t_denote_microtonal* x, long key_idx){
     }
 }
 
+/*
+ * Util function that converts an interval to a note based on the current key
+ */
 long interval_to_note(t_denote_microtonal* x, long interval){
     return correct_interval_or_note_with_key(x, interval, ADD);
 }
 
+/*
+ * Util function that converts a note to an interval based on the current key
+ */
 long note_to_interval(t_denote_microtonal* x, long note){
     return correct_interval_or_note_with_key(x, note, SUB);
 }
 
+/*
+ * Util function that does the actual conversion of interval to note or vice versa based on the note operation and key
+ */
 long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum operation o){
     
     long key_corrected_value;
@@ -552,6 +617,11 @@ long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum 
         case ADD: {
             key_corrected_value = input + x->key_offset;
             key_corrected_value = key_corrected_value % 12;
+            break;
+        }
+        default: {
+            key_corrected_value = -1;
+            break;
         }
     }
     
@@ -560,7 +630,9 @@ long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum 
 }
 
 
-
+/*
+ * Util function that checks if the dictionary path attribute has been set (for saving which dictionary we were using before exiting live)
+ */
 void denote_microtonal_check_dict_state(t_denote_microtonal* x){
     if (x->dictionary_path != gensym("no path")){
         read_dictionary(x, x->dictionary_path->s_name, strlen(x->dictionary_path->s_name));
@@ -568,7 +640,9 @@ void denote_microtonal_check_dict_state(t_denote_microtonal* x){
 }
     
 
-//function that frees all allocated memory
+/*
+ * Util function that frees all allocated memory
+ */
 void denote_microtonal_free(t_denote_microtonal* x){
     for (int i = 0; i < NUM_NOTE_RATIOS; i++){
         if (x->ratio_list[i].ratio_arr != NULL){

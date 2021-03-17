@@ -1,0 +1,65 @@
+{
+	"init" : 	{
+		"C" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"C#" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"D" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"D#" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"E" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"F" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"F#" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"G" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"G#" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"A" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"A#" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		},
+		"B" : 		{
+			"ratios" : 0,
+			"names" : [ ]
+		}
+	}
+,
+	"C" : [  ],
+	"C#" : [  ],
+	"D" : [  ],
+	"D#" : [  ],
+	"E": [  ],
+	"F": [  ],
+	"F#": [  ],
+	"G": [  ],
+	"G#": [  ],
+	"A": [  ],
+	"A#": [  ],
+	"B": [  ]
+}

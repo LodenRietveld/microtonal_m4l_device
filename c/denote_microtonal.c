@@ -97,15 +97,15 @@ void ext_main(void *r)
 
 	c = class_new("denote_microtonal", (method)denote_microtonal_new, (method)denote_microtonal_free, sizeof(t_denote_microtonal), 0L, A_GIMME, 0);
 
-    class_addmethod(c, (method)denote_microtonal_process_incoming_note_list,             "note",         A_GIMME, 0);
-    class_addmethod(c, (method)denote_microtonal_read_dictionary,       "loaddict",     A_GIMME, 0);
-    class_addmethod(c, (method)denote_microtonal_process_ratio_change,  "set_ratio",    A_GIMME, 0);
-    class_addmethod(c, (method)denote_microtonal_set_key,               "set_key",      A_LONG, 0);
-	class_addmethod(c, (method)denote_microtonal_assist,	            "assist",	    A_CANT, 0);
-    class_addmethod(c, (method)denote_microtonal_check_dict_state,      "bang",         A_NOTHING, 0);
+    class_addmethod(c, (method)denote_microtonal_process_incoming_note_list,            "note",         A_GIMME, 0);
+    class_addmethod(c, (method)denote_microtonal_read_dictionary,                       "loaddict",     A_GIMME, 0);
+    class_addmethod(c, (method)denote_microtonal_process_ratio_change,                  "set_ratio",    A_GIMME, 0);
+    class_addmethod(c, (method)denote_microtonal_set_key,                               "set_key",      A_LONG, 0);
+	class_addmethod(c, (method)denote_microtonal_assist,	                            "assist",	    A_CANT, 0);
+    class_addmethod(c, (method)denote_microtonal_check_dict_state,                      "bang",         A_NOTHING, 0);
     
-    CLASS_ATTR_SYM(c, "Dictionary path", ATTR_SET_OPAQUE_USER, t_denote_microtonal, dictionary_path);
-    CLASS_ATTR_SAVE(c, "Dictionary path", 0);
+    CLASS_ATTR_SYM(c, "dict_path", ATTR_FLAGS_NONE, t_denote_microtonal, dictionary_path);
+    CLASS_ATTR_SAVE(c, "dict_path", ATTR_FLAGS_NONE);
 
     
 	class_register(CLASS_BOX, c);
@@ -225,8 +225,6 @@ void *denote_microtonal_new(t_symbol *s, long argc, t_atom *argv)
     x->dict_processed = false;
     x->key_offset = 0;
     x->nr_active_notes = 0;
-    
-    //on object loading set the dict path to "no path". If used in a m4l device, the state will be restored and this dictionary path will be set to the value in the attribute "Dictionary path"
     x->dictionary_path = gensym("no path");
     
 	return x;
@@ -435,7 +433,7 @@ void read_dictionary(t_denote_microtonal* x, char* name, long size){
             t_atom out[2];
             
             atom_setsym(out, gensym("loaded"));
-            atom_setsym(out+1, gensym("bang"));
+            atom_setsym(out+1, gensym(filename_path));
             outlet_list(x->out[0], NULL, 2, out);
             
             x->dictionary_path = gensym(filename_path);
@@ -444,6 +442,7 @@ void read_dictionary(t_denote_microtonal* x, char* name, long size){
         }
         
         object_free((void*) x->d);
+        x->d = NULL;
     }
     
     free(filename_path);
@@ -635,6 +634,11 @@ long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum 
  */
 void denote_microtonal_check_dict_state(t_denote_microtonal* x){
     if (x->dictionary_path != gensym("no path")){
+        if (x->dbg){
+            char buf[200];
+            sprintf(buf, "dictionary path: %s", x->dictionary_path->s_name);
+            dbg_out(x, buf);
+        }
         read_dictionary(x, x->dictionary_path->s_name, strlen(x->dictionary_path->s_name));
     }
 }

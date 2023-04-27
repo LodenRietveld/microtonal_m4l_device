@@ -637,7 +637,7 @@ long correct_interval_or_note_with_key(t_denote_microtonal* x, long input, enum 
 void denote_microtonal_check_dict_state(t_denote_microtonal* x){
     if (x->dictionary_path != gensym("no path")){
         if (x->dbg){
-            char buf[200];
+            char buf[800] = {0};
             sprintf(buf, "dictionary path: %s", x->dictionary_path->s_name);
             dbg_out(x, buf);
         }

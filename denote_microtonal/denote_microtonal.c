@@ -1,7 +1,9 @@
-#include "ext.h"
-#include "ext_obex.h"
 #include <math.h>
-#include "ext_dictionary.h"
+#include <inttypes.h>
+
+#include <ext.h>
+#include <ext_obex.h>
+#include <ext_dictionary.h>
 
 #define NUM_NOTE_RATIOS 12
 #define MAX_VOICES 15
@@ -488,7 +490,7 @@ void denote_microtonal_process_ratio_change(t_denote_microtonal* x, t_symbol *s,
             
             if (x->dbg){
                 char buf[80];
-                sprintf(buf, "ratio change: interval: %"PRId64", note: %ld, ratio_index %"PRId64, interval, key_corrected_note, ratio_index);
+                sprintf(buf, "ratio change: interval: %ld, note: %ld, ratio_index %ld", interval, key_corrected_note, ratio_index);
                 dbg_out(x, buf);
             }
             

@@ -1,0 +1,5 @@
+{
+    "C_Cpp.default.cStandard": "c11",
+    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+    "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true
+}

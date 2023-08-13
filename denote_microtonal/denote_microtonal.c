@@ -1,4 +1,4 @@
-#include <math.h>
+ #include <math.h>
 #include <inttypes.h>
 
 #include <ext.h>
@@ -456,7 +456,7 @@ void read_dictionary(t_denote_microtonal* x, char* name, long size){
  */
 void denote_microtonal_read_dictionary(t_denote_microtonal *x, t_symbol *s, long argc, t_atom *argv){
     char** filename;
-    long size = 100;
+    long size = 1000;
     
     filename = (char**) malloc(sizeof(char*));
     *filename = (char*) malloc(sizeof(char) * size);
